@@ -1,0 +1,20 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+
+# large or regenerable data (model lives on Kaggle/Fab; renders and SfM are reproducible)
+assets/
+runs/*/images/
+runs/*/sfm/*/model/
+runs/*/sfm/*/*.ply
+runs/*/sfm/*/*.npz
+runs/*/exports/gt_mesh.ply
+runs/kaggle_run_002/
+*.db
+data/gt_mesh.ply
+logs_*.txt
+scripts_run_*.sh
+legacy/
+data/test_poses.json
+runs/*/render.log

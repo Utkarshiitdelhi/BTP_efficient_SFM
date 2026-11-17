@@ -1,0 +1,12 @@
+[project]
+name = "btp-uav-reconstruction"
+version = "0.1.0"
+description = "Drone path optimisation for 3D reconstruction of civil structures (simulation study)"
+requires-python = ">=3.11"
+dependencies = [
+  "bpy>=5.0", "pycolmap>=4.0", "trimesh", "embreex", "rtree", "scipy",
+  "numpy", "pandas", "matplotlib", "ortools",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
