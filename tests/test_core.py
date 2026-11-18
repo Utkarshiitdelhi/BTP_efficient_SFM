@@ -68,3 +68,13 @@ def test_two_opt_untangles_a_crossed_square():
     L = np.linalg.norm(pts[:, None] - pts[None], axis=2)
     tour, length = two_opt([0, 1, 2, 3], L)
     assert np.isclose(length, 4.0)
+
+
+def test_robust_align_ignores_misplaced_cameras():
+    from btp.evaluate import robust_align
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(20, 3)) * 10
+    Y = 2.0 * X + [5, 0, 0]
+    Y[:5] += rng.normal(size=(5, 3)) * 20          # five cameras badly misplaced
+    s, R, t, inl = robust_align(X, Y)
+    assert inl.sum() == 15 and np.isclose(s, 2.0) and np.allclose(R, np.eye(3), atol=1e-6)

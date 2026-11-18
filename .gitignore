@@ -19,3 +19,4 @@ legacy/
 data/test_poses.json
 runs/*/render.log
 runs/*/sfm/*/sparse/
+runs/*.log

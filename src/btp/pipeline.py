@@ -30,7 +30,7 @@ SPEED_MPS, DWELL_S = 3.0, 2.0         # cruise speed; hover time per photo
 SEEDS = (0, 1, 2)
 
 # metrics averaged over seeds in the results table
-KEY_METRICS = ["registered", "points", "track_length", "reproj_err_px",
+KEY_METRICS = ["registered", "cams_correct", "points", "track_length", "reproj_err_px",
                "pose_pos_err_m", "pose_rot_err_deg", "acc_median_m",
                "precision@0.30", "recall@0.30", "fscore@0.30",
                "recall@0.50", "fscore@0.50", "recall@1.00", "fscore@1.00"]
@@ -57,13 +57,14 @@ def plan(strategy: str, scene: dict, n: int):
 
 
 def run(strategy: str, run_id: str, n: int = 24, seeds=SEEDS, rerender: bool = False,
-        poses: list | None = None, note: str = "") -> dict:
+        poses: list | None = None, note: str = "", sky: bool = True) -> dict:
     scene = json.load(open(SCENE))
     out = os.path.join(ROOT, "runs", run_id)
     os.makedirs(f"{out}/exports", exist_ok=True)
     if poses is None:
         poses = plan(strategy, scene, n)
-    spec = {"run": run_id, "strategy": strategy, "camera": CAMERA, "poses": poses}
+    spec = {"run": run_id, "strategy": strategy, "camera": {**CAMERA, "sky": sky},
+            "poses": poses}
     json.dump(spec, open(f"{out}/poses.json", "w"), indent=2)
 
     have = len(os.listdir(f"{out}/images")) if os.path.isdir(f"{out}/images") else 0
@@ -112,6 +113,9 @@ def summarise(run_id: str, note: str = "", reevaluate: bool = False) -> dict:
                "observable_frac": first.get("observable_frac"),
                "visible_gt_frac": first.get("visible_gt_frac"),
                "pred_coverage_3views": first.get("pred_coverage_3views"),
+               "pred_coverage_res": first.get("pred_coverage_res"),
+               "min_partners": first.get("min_partners"),
+               "frac_views_2partners": first.get("frac_views_2partners"),
                "min_features": first.get("min_features"),
                "seeds": len(per_seed), "note": note}
     for m in KEY_METRICS:
@@ -143,6 +147,7 @@ if __name__ == "__main__":
     ap.add_argument("--n", type=int, default=24)
     ap.add_argument("--rerender", action="store_true")
     ap.add_argument("--note", default="")
+    ap.add_argument("--no-sky", action="store_true", help="sun only (illumination ablation)")
     a = ap.parse_args()
     if a.reevaluate is not None:
         ids = a.reevaluate or sorted(d for d in os.listdir(os.path.join(ROOT, "runs"))
@@ -151,6 +156,6 @@ if __name__ == "__main__":
             sm = summarise(rid, reevaluate=True)
             print(rid, sm["strategy"], f"F@0.3={sm['fscore@0.30']:.3f}", f"R@1={sm['recall@1.00']:.3f}")
         sys.exit(0)
-    s = run(a.strategy, a.run_id, a.n, rerender=a.rerender, note=a.note)
+    s = run(a.strategy, a.run_id, a.n, rerender=a.rerender, note=a.note, sky=not a.no_sky)
     print(json.dumps({k: s[k] for k in ("run", "registered", "points", "fscore@0.30",
                                          "path_length_m", "flight_time_s")}, indent=1))

@@ -34,6 +34,10 @@ MIN_OVERLAP = 0.25       # fraction of a new view's points already seen by one c
 SAFETY_M = 3.0           # clearance around the building's bounding box
 MAX_EFF_GSD = 0.12       # v2: metres per pixel on the surface for a view to count
 MAX_LINK_DEG = 35.0      # v2: a new view must overlap a chosen view within this angle
+# v3 chain rule, calibrated on every image rendered in this study: an image with
+# >= 2 partners (>= 50% shared surface, <= 20 deg apart) registered 92% of the
+# time (n=101); with fewer, ~45%.
+PARTNER_OVERLAP, PARTNER_DEG, MIN_PARTNERS = 0.5, 20.0, 2
 
 
 # ---------------------------------------------------------------- candidates
@@ -54,7 +58,9 @@ def candidates(scene: dict, radius_mults=(2.8, 2.0), n_az=24) -> list[dict]:
                 if hf <= 1.0:
                     poses.append({"position": pos, "target": (ctr[0], ctr[1], z),
                                   "ring": f"r{rm}_h{hf}_level"})
-                poses.append({"position": pos, "target": tuple(ctr), "ring": f"r{rm}_h{hf}_centre"})
+                if abs(z - ctr[2]) > 0.5:          # at mid-height the two aims coincide
+                    poses.append({"position": pos, "target": tuple(ctr),
+                                  "ring": f"r{rm}_h{hf}_centre"})
     # close-in ring above the roof, looking down at the roof
     R = r0 * 1.0
     for k in range(n_az // 2):
@@ -255,6 +261,125 @@ def local_search(tour: list[int], useful, V, L, budget_s, speed, dwell, axes=Non
     return tour, length, counts
 
 
+def partner_matrix(V, axes, positions):
+    """P[i, j]: j is a registration partner for i (overlap and direction, distinct position)."""
+    Vf = V.astype(np.float32)
+    inter = Vf @ Vf.T
+    ov = inter / np.maximum(Vf.sum(1)[:, None], 1)
+    ang = np.degrees(np.arccos(np.clip(axes @ axes.T, -1, 1)))
+    dist = np.linalg.norm(positions[:, None] - positions[None], axis=2)
+    Pm = (ov >= PARTNER_OVERLAP) & (ang <= PARTNER_DEG) & (dist > 1.0)
+    np.fill_diagonal(Pm, False)
+    return Pm
+
+
+def chained(tour, Pm, min_partners=MIN_PARTNERS) -> bool:
+    if len(tour) <= min_partners:
+        return True
+    t = np.array(tour)
+    sub = Pm[np.ix_(t, t)]
+    if (sub.sum(1) < min_partners).any():
+        return False
+    # one connected component (as an undirected graph)
+    adj = sub | sub.T
+    seen, stack = {0}, [0]
+    while stack:
+        k = stack.pop()
+        for j in np.where(adj[k])[0]:
+            if j not in seen:
+                seen.add(int(j)); stack.append(int(j))
+    return len(seen) == len(t)
+
+
+def chain_search(start, useful, Pm, L, positions, budget_s=None, n_fixed=None,
+                 speed=3.0, dwell=2.0, max_passes=8):
+    """Local search that keeps every view chained (>= MIN_PARTNERS partners) while
+    raising resolution-aware coverage. Fixed size (n_fixed) uses swaps only;
+    a flight-time budget also allows additions."""
+    U = useful.astype(np.int16)
+    C = U.shape[0]
+    tour, length = two_opt(list(start), L)
+    counts = U[tour].sum(0)
+    value = coverage_value(counts)
+
+    def ok(t, ln):
+        if budget_s is not None and ln / speed + dwell * len(t) > budget_s + 1e-9:
+            return False
+        dmin = np.linalg.norm(positions[t][:, None] - positions[t][None], axis=2)
+        np.fill_diagonal(dmin, np.inf)
+        return dmin.min() > 1.0 and chained(t, Pm)
+
+    for _ in range(max_passes):
+        improved = False
+        if n_fixed is None:                          # additions
+            gains = np.array([coverage_value(counts + U[c]) if c not in tour else -1
+                              for c in range(C)])
+            for c in np.argsort(-gains)[:60]:
+                c = int(c)
+                if gains[c] <= value + 1e-9:
+                    break
+                t2, l2 = two_opt(tour + [c], L)
+                if ok(t2, l2):
+                    tour, length, counts, value, improved = t2, l2, counts + U[c], gains[c], True
+        for out in list(tour):                       # swaps
+            if out not in tour:
+                continue
+            base = counts - U[out]
+            rest = [t for t in tour if t != out]
+            gains = np.array([coverage_value(base + U[c]) if c not in tour else -1
+                              for c in range(C)])
+            for c in np.argsort(-gains)[:60]:
+                c = int(c)
+                if gains[c] <= value + 1e-9:
+                    break
+                t2, l2 = two_opt(rest + [c], L)
+                if ok(t2, l2):
+                    tour, length, counts, value, improved = t2, l2, base + U[c], gains[c], True
+                    break
+        if not improved:
+            break
+    return tour, length, counts
+
+
+def plan_chain(scene: dict, cam: dict, mesh_path: str, n_views: int | None = None,
+               budget_s: float | None = None, speed: float = 3.0, dwell: float = 2.0,
+               n_samples: int = 8000, seed: int = 0, return_details: bool = False):
+    """v3: resolution-aware coverage, every view chained, started from the best
+    feasible whole ring of candidates (a regular orbit is always chained)."""
+    cand, pos, V, I, dirs, axes, useful = _setup(scene, cam, mesh_path, n_samples, seed,
+                                                 MAX_EFF_GSD)
+    L = leg_matrix(pos, scene)
+    Pm = partner_matrix(V, axes, pos)
+    U16 = useful.astype(np.int16)
+    rings: dict[str, list[int]] = {}
+    for i, c in enumerate(cand):
+        rings.setdefault(c.get("ring", ""), []).append(i)
+    best = None
+    for name, idx in rings.items():
+        if n_views is not None and len(idx) != n_views:
+            continue
+        t, ln = two_opt(idx, L)
+        if budget_s is not None and ln / speed + dwell * len(t) > budget_s:
+            continue
+        if not chained(t, Pm):
+            continue
+        v = coverage_value(U16[t].sum(0))
+        if best is None or v > best[0]:
+            best = (v, name, t)
+    if best is None:
+        raise RuntimeError("no feasible starting ring")
+    tour, length, count = chain_search(best[2], useful, Pm, L, pos, budget_s=budget_s,
+                                       n_fixed=n_views, speed=speed, dwell=dwell)
+    picked = [cand[i] for i in tour]
+    order, length = route([p["position"] for p in picked], scene)
+    poses = [picked[i] for i in order]
+    if return_details:
+        return poses, {"start_ring": best[1], "start_value": round(best[0], 1),
+                       "final_value": round(coverage_value(count), 1), "n_views": len(poses),
+                       "tour_length_m": length, "flight_time_s": length / speed + dwell * len(poses)}
+    return poses
+
+
 def two_opt(tour: list[int], L: np.ndarray) -> tuple[list[int], float]:
     """2-opt improvement of a closed tour on leg matrix L; returns (tour, length)."""
     t = list(tour)
@@ -421,10 +546,17 @@ def plan_from_spec(strategy: str, scene: dict, n: int, cam: dict):
     planner_budget<T>     v1, flight-time budget of T seconds
     planner_res           v2, resolution-aware usefulness + angular link rule
     planner_res_budget<T> v2 with a flight-time budget
+    planner_chain         v3, v2 usefulness + every view chained (>= 2 partners), n views
+    planner_chain_budget<T> v3 with a flight-time budget
     """
     import os
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     mesh = os.path.join(root, "data/gt_mesh.ply")
+    if strategy.startswith("planner_chain"):            # v3
+        rest = strategy[len("planner_chain"):]
+        if rest.startswith("_budget"):
+            return plan_chain(scene, cam, mesh, budget_s=float(rest[len("_budget"):]))
+        return plan_chain(scene, cam, mesh, n_views=n)
     v2 = strategy.startswith("planner_res")
     kw = {"max_eff_gsd": MAX_EFF_GSD, "max_link_deg": MAX_LINK_DEG} if v2 else {}
     rest = strategy[len("planner_res"):] if v2 else strategy[len("planner"):]

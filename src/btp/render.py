@@ -41,8 +41,10 @@ def load_scene(blend_path: str) -> dict:
             "struct_radius": struct_r, "height": hi[2] - lo[2]}
 
 
-def add_environment(info: dict) -> None:
-    """Ground plane, sun and sky — identical to the final Kaggle run_002 setup."""
+def add_environment(info: dict, sky: bool = True) -> None:
+    """Ground plane, sun and sky — identical to the final Kaggle run_002 setup.
+    sky=False reproduces the first Kaggle attempt (sun only, black sky) for the
+    illumination ablation."""
     ctr, lo, hi = info["centre"], info["bbox_lo"], info["bbox_hi"]
     R = info["struct_radius"] * GROUND_RADIUS_MULT
 
@@ -78,8 +80,13 @@ def add_environment(info: dict) -> None:
     bpy.context.scene.world = world
     world.use_nodes = True
     bg = world.node_tree.nodes["Background"]
-    bg.inputs["Color"].default_value = (0.35, 0.40, 0.48, 1.0)
-    bg.inputs["Strength"].default_value = 1.2
+    if sky:
+        bg.inputs["Color"].default_value = (0.35, 0.40, 0.48, 1.0)
+        bg.inputs["Strength"].default_value = 1.2
+    else:
+        sun.data.energy = 5
+        sun.data.angle = 0.02
+        bg.inputs["Strength"].default_value = 0.0
 
 
 def export_gt_mesh(path: str) -> tuple[int, int]:
@@ -165,7 +172,7 @@ def main() -> None:
         return
 
     spec = json.load(open(a.poses))
-    add_environment(info)
+    add_environment(info, sky=spec["camera"].get("sky", True))
     os.makedirs(f"{a.out}/exports", exist_ok=True)
     nv, nf = export_gt_mesh(f"{a.out}/exports/gt_mesh.ply")
     print(f"GT MESH {nv} verts {nf} tris", flush=True)

@@ -40,6 +40,23 @@ def umeyama(src, dst):
     return s, R, md - s * R @ ms
 
 
+def robust_align(src, dst, thresh=0.5, iters=500, seed=0):
+    """RANSAC similarity: fit on 3-camera samples, keep the largest set of cameras
+    landing within `thresh` metres of their true positions, refit on them."""
+    rng = np.random.default_rng(seed)
+    best = np.zeros(len(src), bool)
+    for _ in range(iters):
+        idx = rng.choice(len(src), 3, replace=False)
+        s, R, t = umeyama(src[idx], dst[idx])
+        inl = np.linalg.norm((s * (R @ src.T)).T + t - dst, axis=1) < thresh
+        if inl.sum() > best.sum():
+            best = inl
+    if best.sum() < 3:
+        best[:] = True
+    s, R, t = umeyama(src[best], dst[best])
+    return s, R, t, best
+
+
 def predicted_coverage(V, D, I, min_views=3, max_inc=70.0):
     """Fraction of visible-able surface seen by >= min_views cameras at incidence < max_inc."""
     good = V & (I < max_inc)
@@ -73,6 +90,28 @@ def observable_surface(root: str, n_samples: int = 30_000) -> np.ndarray:
     return obs
 
 
+def predicted_coverage_res(V, D, I, f_px, max_eff_gsd=0.12, min_views=3, max_inc=70.0):
+    """As predicted_coverage, but a view counts only if it resolves the surface:
+    distance / f_px / cos(incidence) < max_eff_gsd metres per pixel."""
+    eff = D / f_px / np.cos(np.radians(np.minimum(I, 89.0)))
+    good = V & (I < max_inc) & (eff < max_eff_gsd)
+    return float((good.sum(0) >= min_views).mean())
+
+
+def chain_stats(V, poses, overlap=0.5, max_deg=20.0) -> dict:
+    """Registration partners per view (>= overlap shared surface, <= max_deg apart)."""
+    pos = np.array([p["position"] for p in poses], float)
+    ax = np.array([np.subtract(p["target"], p["position"]) for p in poses], float)
+    ax /= np.linalg.norm(ax, axis=1, keepdims=True)
+    Vf = V.astype(np.float32)
+    ov = (Vf @ Vf.T) / np.maximum(Vf.sum(1)[:, None], 1)
+    ang = np.degrees(np.arccos(np.clip(ax @ ax.T, -1, 1)))
+    d = np.linalg.norm(pos[:, None] - pos[None], axis=2)
+    np.fill_diagonal(d, 0.0)
+    k = ((ov >= overlap) & (ang <= max_deg) & (d > 1.0)).sum(1)
+    return {"min_partners": int(k.min()), "frac_views_2partners": float((k >= 2).mean())}
+
+
 def evaluate(run_dir: str, tag: str = "seed0", mesh_path: str | None = None,
              n_samples: int = 30_000) -> dict:
     work = f"{run_dir}/sfm/{tag}"
@@ -95,7 +134,9 @@ def evaluate(run_dir: str, tag: str = "seed0", mesh_path: str | None = None,
            "gsd_mm_px": med_dist * 1000 / f_px,
            "observable_frac": float(obs.mean()),
            "visible_gt_frac": float(seen[obs].mean()),
-           "pred_coverage_3views": predicted_coverage(V[:, obs], D[:, obs], I[:, obs])}
+           "pred_coverage_3views": predicted_coverage(V[:, obs], D[:, obs], I[:, obs]),
+           "pred_coverage_res": predicted_coverage_res(V[:, obs], D[:, obs], I[:, obs], f_px),
+           **chain_stats(V, poses)}
 
     # ---- align estimated cameras to true ones ----
     est = load_cameras(f"{work}/model")
@@ -109,10 +150,14 @@ def evaluate(run_dir: str, tag: str = "seed0", mesh_path: str | None = None,
     R_true = [true_by[n][:3, :3] @ BLENDER_TO_COLMAP for n in names]
     C_est = np.array([est[n][1] for n in names])
     R_est = [est[n][0] for n in names]
-    s, Ra, ta = umeyama(C_est, C_true)
+    # Robust alignment: a partly broken model is scored on the part it got right,
+    # and "correctly placed" cameras (within 0.5 m) are counted separately from
+    # merely "registered" ones.
+    s, Ra, ta, inl = robust_align(C_est, C_true)
     pos_err = np.linalg.norm((s * (Ra @ C_est.T)).T + ta - C_true, axis=1)
     rot_err = [np.degrees(np.arccos(np.clip((np.trace(Rt.T @ (Ra @ Re)) - 1) / 2, -1, 1)))
                for Rt, Re in zip(R_true, R_est)]
+    rot_err = np.array(rot_err)
 
     # ---- reconstructed points, aligned, cropped to the structure ----
     X = (s * (Ra @ load_points(f"{work}/model").T)).T + ta
@@ -125,8 +170,9 @@ def evaluate(run_dir: str, tag: str = "seed0", mesh_path: str | None = None,
     out.update(
         status="ok",
         align_scale=float(s),
-        pose_pos_err_m=float(pos_err.mean()), pose_pos_err_max_m=float(pos_err.max()),
-        pose_rot_err_deg=float(np.mean(rot_err)),
+        cams_correct=int(inl.sum()),
+        pose_pos_err_m=float(pos_err[inl].mean()), pose_pos_err_max_m=float(pos_err.max()),
+        pose_rot_err_deg=float(rot_err[inl].mean()),
         points_on_structure=int(keep.sum()), points_total=int(len(X)),
         acc_mean_m=float(d_r2g.mean()), acc_median_m=float(np.median(d_r2g)),
     )
