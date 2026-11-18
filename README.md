@@ -84,6 +84,26 @@ registered 92% of the time, against about 45% for images that did not.
 - **Idealised flight model.** Constant 3 m/s and 2 s hover; no wind, battery curve or GPS error.
 
 
+### Real-photo test
+
+To check the pipeline outside simulation, a stack of books was photographed with an iPhone 17:
+21 photos taken walking around it, at three zoom settings (26, 21 and 17 mm equivalent). The
+pipeline gives each zoom setting its own camera, starts from the focal length in the photo
+metadata and lets COLMAP calibrate each lens.
+
+| | Real photos (book stack) | Simulation (single orbit) |
+|---|--:|--:|
+| Photos placed | 21/21, all 3 seeds | 24/24 |
+| 3D points | ≈3,190 | ≈3,800 |
+| Reprojection error | 1.0 px | 0.3 px |
+
+COLMAP's focal estimates landed 8–14% above the metadata values and agreed across seeds to
+within 0.3%. There is no ground-truth model of the books, so this shows the pipeline works on
+real photos, not how accurate it is on them. The photos themselves are not in the repository.
+
+![real-photo test](results/figures/real_books.png)
+
+
 ## Pipeline
 
 ```
@@ -171,9 +191,13 @@ Strategy names in `pipeline.py`: `planner`, `planner_budget153` (v1), `planner_r
 ```bash
 uv venv -p 3.13 .venv && VIRTUAL_ENV=.venv uv pip install -e . pytest
 # model: "Arabic Neoclassical Tall Residential Complex Building" (Carthage Studio, Fab, free
-# personal licence) -> assets/Blender/Blender_004.blend with its Textures/ folder
+# personal licence) -> assets/Blender/Blender_004.blend with its Textures/ folder.
+# The project's copy: https://drive.google.com/file/d/1uo8s26VfG7t6ITqX8a8mtWOHmOuG_w0S/view?usp=sharing
 ./scripts/run_all.sh          # ~25 min per strategy on 2 CPUs
 python -m pytest tests
+
+# real photos: one folder of JPEG/HEIC photos -> runs/<run-id>, results/figures/<run-id>.png
+python -m btp.real --src ~/Downloads/real/books --run-id real_books
 ```
 
 Runs on CPU only; peak memory stays under 7 GB because Cycles caps textures at 2K
@@ -182,8 +206,9 @@ Runs on CPU only; peak memory stays under 7 GB because Cycles caps textures at 2
 ## Repository
 
 ```
-src/btp/       pipeline code (geometry, render, strategies, planner, reconstruct, evaluate, report)
+src/btp/       pipeline code (geometry, render, strategies, planner, reconstruct, evaluate, report, real)
 runs/run_*/    poses.json, rendered_poses, SfM stats and evaluation per seed
+runs/real_books/  real-photo test: camera priors and SfM stats per seed
 results/       results.csv, results_by_seed.csv, results_table.md, figures/
 notebooks/     the original Kaggle notebooks (outputs stripped)
 tests/         geometry, alignment and routing checks
