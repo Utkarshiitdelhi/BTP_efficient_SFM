@@ -238,7 +238,7 @@ def lighting_figure(run="run_002", ablation="run_012"):
     if off is not None:
         before = list(off["features_per_image"].values())
         regs = [s["registered"] for s in (_stats(ablation, k) for k in range(3)) if s]
-        lab_b = "Sun only (ablation, run_012)"
+        lab_b = "Sun only"
         txt_b = f"sun only: {min(regs)}–{max(regs)}/24 registered" if min(regs) != max(regs) \
             else f"sun only: {regs[0]}/24 registered"
     else:
@@ -249,18 +249,14 @@ def lighting_figure(run="run_002", ablation="run_012"):
     x = np.arange(24) * 15
     ax.plot(x, before, "-o", lw=2, ms=4, color="#eb6834")
     ax.plot(x, after, "-o", lw=2, ms=4, color="#2a78d6")
-    k = int(np.argmin(before))
-    ax.annotate(txt_b, (x[k], before[k]),
-                xytext=(10, -16), textcoords="offset points", fontsize=8.5, color=INK)
-    ax.annotate(f"sun + sky light: {on['registered']}/24 registered", (x[k], after[k]),
-                xytext=(10, 16), textcoords="offset points", fontsize=8.5, color=INK)
-    ax.legend([lab_b, "Sun + sky light"], frameon=False,
-              fontsize=8.5, loc="upper center", ncol=2)
+    ax.legend([f"{lab_b} — {txt_b.split(': ')[1]}",
+               f"Sun + sky light — {on['registered']}/24 registered"], frameon=False,
+              fontsize=8.5, loc="upper center", ncol=1)
     ax.set_xlabel("Camera azimuth around the single orbit (degrees)")
     ax.set_ylabel("SIFT features per image")
-    ax.set_title("The rear elevation is featureless; without sky light it is unmatchable",
+    ax.set_title("Sky light keeps the shaded rear elevation textured enough to register",
                  loc="left", fontsize=11, color=INK)
-    ax.set_ylim(0, max(max(after), max(before)) * 1.25)
+    ax.set_ylim(0, max(max(after), max(before)) * 1.3)
     fig.tight_layout()
     _save(fig, "lighting_features.png")
 

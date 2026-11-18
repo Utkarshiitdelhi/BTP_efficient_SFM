@@ -14,7 +14,7 @@ unknown, so reconstruction error can't be measured. Here the 3D model *is* the g
 
 ## Results
 
-Ten flights of one 12-storey building, each rendered, reconstructed with three SfM seeds and
+Ten flights of one 12-storey building (plus a lighting ablation), each rendered, reconstructed with three SfM seeds and
 scored against the true mesh. Full table: [`results/results_table.md`](results/results_table.md).
 
 | Flight | Flight time | Cameras placed correctly | F-score @ 0.30 m | Surface within 1 m | Median error |
@@ -31,7 +31,7 @@ scored against the true mesh. Full table: [`results/results_table.md`](results/r
 **What the experiments show**
 
 1. **The final planner beats the best standard flight while flying less.** Planner v3 with 24
-   views scores F = 0.227 against the single orbit's 0.193 (+18%), with a 27% lower median error
+   views scores F = 0.227 against the single orbit's 0.193 (+18%), with a 26% lower median error
    (1.9 vs 2.6 cm) and the same coverage, in 126 s instead of 153 s. Its plan is a tighter orbit
    (36 m instead of 50 m standoff) that zig-zags between 70% and 90% of the building height,
    which the planner chose for finer ground resolution on the upper facades.
@@ -44,9 +44,11 @@ scored against the true mesh. Full table: [`results/results_table.md`](results/r
    (Spearman ρ = −0.08). Requiring each view to resolve the surface finer than 0.12 m/px ranks
    every flight whose SfM chain held together exactly (ρ = 1.00). The remaining failures are
    chain breaks, which the v3 partner rule predicts (below).
-4. **Lighting is a precondition, not a detail.** With a sun alone the shadowed rear elevation
-   has a tenth of the SIFT features of the lit side and SfM cannot connect it. Adding diffuse
-   sky light fixed it. <!-- ABLATION -->
+4. **Lighting matters as much as some flight-path changes.** Re-flying the single orbit with
+   the sun alone (no diffuse sky light, run_012) leaves the shaded rear elevation with about 45%
+   fewer SIFT features; 4 of 24 images drop out, F falls 13% (0.193 → 0.167), coverage within
+   1 m falls from 54% to 44% and the median error nearly doubles (2.6 → 4.9 cm). The first
+   sun-only attempt on Kaggle failed outright. Every other run uses sun + sky light.
 5. **Limits of a geometry-only planner.** Even v3 loses four images on the plain rear wall,
    which ray casting cannot tell apart from a textured one. The budgeted variant, given more
    freedom, folds in low-altitude views whose chain breaks — it is the clearest negative result
@@ -62,8 +64,8 @@ scored against the true mesh. Full table: [`results/results_table.md`](results/r
 | v2 | + a view only counts if it resolves the surface at < 0.12 m/px | right views, but SfM could not join them: 5/24 placed |
 | v3 | + every view needs **≥2 partner views** (≥50% shared surface, ≤20° apart) | 20/24 placed; best F-score of any flight |
 
-The v3 partner rule was not guessed: across the 101 images of the earlier runs, images that
-met it were registered 92% of the time, against about 45% for those that did not.
+The v3 partner rule was not guessed: in the earlier runs, the 101 images that met it were
+registered 92% of the time, against about 45% for images that did not.
 
 ![predicted vs measured](results/figures/predicted_vs_measured.png)
 ![coverage maps](results/figures/coverage_maps.png)
