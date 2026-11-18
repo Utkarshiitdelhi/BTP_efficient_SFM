@@ -62,9 +62,18 @@ def reconstruct(run_dir: str, cam: dict, focal: str = "known", seed: int = 0,
     if sfm["affine_dsp"]:
         ext.sift.estimate_affine_shape = True
         ext.sift.domain_size_pooling = True
-    pycolmap.extract_features(db, img_dir, camera_mode=pycolmap.CameraMode.SINGLE,
-                              reader_options=reader, extraction_options=ext,
-                              device=pycolmap.Device.cpu)
+    if focal == "prior" and cam.get("groups"):
+        # Real photos taken at more than one zoom setting: one camera per setting.
+        for f_px, names in cam["groups"].items():
+            reader.camera_params = f"{f_px},{cam['cx']},{cam['cy']},0"
+            pycolmap.extract_features(db, img_dir, image_names=names,
+                                      camera_mode=pycolmap.CameraMode.SINGLE,
+                                      reader_options=reader, extraction_options=ext,
+                                      device=pycolmap.Device.cpu)
+    else:
+        pycolmap.extract_features(db, img_dir, camera_mode=pycolmap.CameraMode.SINGLE,
+                                  reader_options=reader, extraction_options=ext,
+                                  device=pycolmap.Device.cpu)
     t_ext = time.time()
 
     mopt = pycolmap.FeatureMatchingOptions()
@@ -104,6 +113,7 @@ def reconstruct(run_dir: str, cam: dict, focal: str = "known", seed: int = 0,
     os.makedirs(f"{work}/model", exist_ok=True)
     rec.write_text(f"{work}/model")
     cam0 = next(iter(rec.cameras.values()))
+    focals = {int(c.camera_id): float(c.params[0]) for c in rec.cameras.values()}
     out.update(
         model_id=int(best_id),
         registered=rec.num_reg_images(),
@@ -113,6 +123,7 @@ def reconstruct(run_dir: str, cam: dict, focal: str = "known", seed: int = 0,
         track_length=float(rec.compute_mean_track_length()),
         reproj_err_px=float(rec.compute_mean_reprojection_error()),
         focal_estimated_px=float(cam0.params[0]),
+        focals_estimated_px=focals,
     )
     json.dump(out, open(f"{work}/sfm_stats.json", "w"), indent=2)
     os.remove(db)                      # regenerable, and the largest file in the run

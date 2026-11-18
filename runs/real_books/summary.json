@@ -1,0 +1,11 @@
+{
+  "run": "real_books",
+  "n_photos": 21,
+  "registered": 21.0,
+  "points": 3193.0,
+  "track_length": 3.539618961232137,
+  "reproj_err_px": 1.0050844004260617,
+  "focal_estimated_px": 1562.9926743694314,
+  "registered_min": 21,
+  "n_models_max": 1
+}

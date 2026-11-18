@@ -36,13 +36,14 @@ def ingest(src: str, out: str, max_side: int = MAX_SIDE) -> dict:
     if not files:
         raise SystemExit(f"no photos in {src}")
     os.makedirs(f"{out}/images", exist_ok=True)
-    f35s, sizes = [], set()
+    f35s, sizes, per_image = [], set(), {}
     for i, f in enumerate(files):
         im = Image.open(os.path.join(src, f))
         exif = im.getexif()
         f35 = exif.get_ifd(0x8769).get(0xA405) or exif.get(0xA405)   # FocalLengthIn35mmFilm
         if f35:
             f35s.append(float(f35))
+            per_image[f"img_{i:03d}.jpg"] = float(f35)
         im = ImageOps.exif_transpose(im).convert("RGB")
         im.thumbnail((max_side, max_side), Image.LANCZOS)
         sizes.add(im.size)
@@ -57,6 +58,14 @@ def ingest(src: str, out: str, max_side: int = MAX_SIDE) -> dict:
     prior = {"f_px": f_px, "cx": w / 2, "cy": h / 2, "width": w, "height": h,
              "focal_35mm": f35, "n_photos": len(files),
              "source_files": files}
+    # Phones switch lens or crop between photos (0.5x / 0.8x / 1x): one camera per setting.
+    if len(set(per_image.values())) > 1:
+        groups = {}
+        for name, v in sorted(per_image.items()):
+            groups.setdefault(round(v / 36.0 * max(w, h), 1), []).append(name)
+        prior["groups"] = groups
+        print(f"photos use {len(groups)} focal settings: "
+              + ", ".join(f"{k:.0f} px x{len(v)}" for k, v in groups.items()))
     json.dump(prior, open(f"{out}/camera_prior.json", "w"), indent=2)
     return prior
 
@@ -64,11 +73,15 @@ def ingest(src: str, out: str, max_side: int = MAX_SIDE) -> dict:
 def run(src: str, run_id: str, seeds=(0, 1, 2)) -> dict:
     out = os.path.join(ROOT, "runs", run_id)
     prior = ingest(src, out)
+    if "groups" in prior:
+        prior["groups"] = {float(k): v for k, v in prior["groups"].items()}
     print(f"[{run_id}] {prior['n_photos']} photos, focal prior {prior['f_px']:.0f} px "
           f"({'EXIF' if prior['focal_35mm'] else 'guess'})", flush=True)
     rows = []
     for seed in seeds:
-        s = reconstruct(out, prior, focal="prior", seed=seed)
+        # phone photos give far more features than renders; cap them so matching fits in memory
+        s = reconstruct(out, prior, focal="prior", seed=seed, threads=1,
+                        sfm={"max_num_features": 4096, "guided_matching": False})
         rows.append(s)
         print(f"[{run_id}] seed {seed}: registered {s['registered']}/{prior['n_photos']}, "
               f"points {s.get('points')}, reproj {s.get('reproj_err_px', float('nan')):.2f} px",
