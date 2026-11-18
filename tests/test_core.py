@@ -60,3 +60,11 @@ def test_leg_clear_of_building_is_straight():
 def test_leg_over_roof_is_straight():
     a, b = np.array([40.0, 0, 70]), np.array([-40.0, 0, 70])
     assert np.isclose(leg_cost(a, b, SCENE), 80)
+
+
+def test_two_opt_untangles_a_crossed_square():
+    from btp.planner import two_opt
+    pts = np.array([[0, 0], [1, 1], [1, 0], [0, 1]], float)       # crossed order
+    L = np.linalg.norm(pts[:, None] - pts[None], axis=2)
+    tour, length = two_opt([0, 1, 2, 3], L)
+    assert np.isclose(length, 4.0)

@@ -4,10 +4,11 @@
    estimated camera centres are mapped onto the true ones (Umeyama similarity).
 2. Pose error: how far each recovered camera sits from where it really was.
 3. Accuracy / precision: how close reconstructed points are to the true surface.
-4. Completeness / recall: how much of the *visible* true surface has a
-   reconstructed point nearby. Surfaces no camera could see (the base sitting
-   on the ground, interior faces) are excluded, so a strategy is not penalised
-   for geometry that was never observable.
+4. Completeness / recall: how much of the *observable* true surface has a
+   reconstructed point nearby. "Observable" is one fixed set for every flight:
+   surface that any viewpoint in the study could see. Hidden geometry (the base
+   on the ground, interior faces) is excluded; surface a flight merely failed
+   to look at is not.
 5. Predicted coverage: geometry-only score from the flight plan alone (no
    images) - the fraction of surface seen by >=3 cameras with usable angles.
    This is the quantity a planner can optimise before flying.
@@ -45,6 +46,33 @@ def predicted_coverage(V, D, I, min_views=3, max_inc=70.0):
     return float((good.sum(0) >= min_views).mean())
 
 
+OBSERVABLE = "data/observable_surface.npz"
+
+
+def observable_surface(root: str, n_samples: int = 30_000) -> np.ndarray:
+    """Surface samples that ANY viewpoint in the study could see - every planner
+    candidate plus every baseline pose. Recall is measured over this one fixed
+    set, so a flight is not let off for surface it simply never looked at, but
+    nobody is penalised for geometry no camera can see (base, interior faces)."""
+    import os
+    path = os.path.join(root, OBSERVABLE)
+    if os.path.exists(path):
+        z = np.load(path)
+        if len(z["observable"]) == n_samples:
+            return z["observable"]
+    from btp.pipeline import CAMERA
+    from btp.planner import candidates
+    from btp.strategies import BASELINES
+    scene = json.load(open(os.path.join(root, "data/scene.json")))
+    mesh = load_mesh(os.path.join(root, "data/gt_mesh.ply"))
+    P, Nrm, _ = sample_surface(mesh, n_samples, seed=0)
+    poses = candidates(scene) + [p for f in BASELINES.values() for p in f(scene, 24)]
+    V, _, _ = visibility_matrix(mesh, P, Nrm, poses, CAMERA)
+    obs = V.any(0)
+    np.savez_compressed(path, observable=obs, n_poses=len(poses))
+    return obs
+
+
 def evaluate(run_dir: str, tag: str = "seed0", mesh_path: str | None = None,
              n_samples: int = 30_000) -> dict:
     work = f"{run_dir}/sfm/{tag}"
@@ -56,14 +84,18 @@ def evaluate(run_dir: str, tag: str = "seed0", mesh_path: str | None = None,
     # ---- surface samples and which cameras see them (true poses) ----
     P, Nrm, _ = sample_surface(mesh, n_samples, seed=0)
     V, D, I = visibility_matrix(mesh, P, Nrm, poses, cam)
-    seen = V.any(0)
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(run_dir)))
+    obs = observable_surface(root, n_samples)
+    seen = V.any(0) & obs                 # seen by this flight, within the observable set
     f_px = intrinsics(cam["lens_mm"], cam["sensor_mm"], cam["res_x"], cam["res_y"])[0]
     med_dist = float(np.median(D[V])) if V.any() else float("nan")
     out = {"n_samples": n_samples,
            "median_view_distance_m": med_dist,
            "gsd_mm_px": med_dist * 1000 / f_px,
-           "visible_gt_frac": float(seen.mean()),
-           "pred_coverage_3views": predicted_coverage(V, D, I)}
+           "observable_frac": float(obs.mean()),
+           "visible_gt_frac": float(seen[obs].mean()),
+           "pred_coverage_3views": predicted_coverage(V[:, obs], D[:, obs], I[:, obs])}
 
     # ---- align estimated cameras to true ones ----
     est = load_cameras(f"{work}/model")
@@ -87,7 +119,8 @@ def evaluate(run_dir: str, tag: str = "seed0", mesh_path: str | None = None,
     keep = np.all((X > lo - 1.0) & (X < hi + 1.0), axis=1) & (X[:, 2] > lo[2] + 0.3)
     Xs = X[keep]
     _, d_r2g, _ = mesh.nearest.on_surface(Xs) if len(Xs) else (None, np.array([]), None)
-    d_g2r = cKDTree(Xs).query(P[seen])[0] if len(Xs) else np.full(seen.sum(), np.inf)
+    # completeness over the whole observable surface (same denominator for every flight)
+    d_g2r = cKDTree(Xs).query(P[obs])[0] if len(Xs) else np.full(obs.sum(), np.inf)
 
     out.update(
         status="ok",
@@ -105,8 +138,8 @@ def evaluate(run_dir: str, tag: str = "seed0", mesh_path: str | None = None,
     out["recall"] = out[f"recall@{HEADLINE_TAU:.2f}"]
 
     # per-sample reconstruction status, for coverage maps and the planner study
-    np.savez_compressed(f"{work}/surface_eval.npz", P=P, N=Nrm, seen=seen,
-                        n_views=V.sum(0), d_g2r=_full(seen, d_g2r))
+    np.savez_compressed(f"{work}/surface_eval.npz", P=P, N=Nrm, seen=seen, observable=obs,
+                        n_views=V.sum(0), d_g2r=_full(obs, d_g2r))
     json.dump(out, open(f"{work}/eval.json", "w"), indent=2)
     return out
 

@@ -76,29 +76,48 @@ def run(strategy: str, run_id: str, n: int = 24, seeds=SEEDS, rerender: bool = F
                            check=True, env=env, stdout=log, stderr=subprocess.STDOUT)
         print(f"[{run_id}] rendered {len(poses)} images in {time.time() - t0:.0f}s", flush=True)
 
-    per_seed = []
     for seed in seeds:
         sfm = reconstruct(out, CAMERA, focal="known", seed=seed)
-        ev = evaluate(out, tag=f"seed{seed}") if sfm["registered"] >= 3 else {"status": "failed"}
-        row = {"run": run_id, "strategy": strategy, "seed": seed,
-               **{k: v for k, v in sfm.items() if not isinstance(v, (dict, list))},
-               **ev}
+        if sfm["registered"] >= 3:
+            evaluate(out, tag=f"seed{seed}")
+        print(f"[{run_id}] seed {seed}: registered {sfm['registered']}/{len(poses)}, "
+              f"points {sfm.get('points')}", flush=True)
+    return summarise(run_id, note=note)
+
+
+def summarise(run_id: str, note: str = "", reevaluate: bool = False) -> dict:
+    """Build the results rows for a run from its per-seed SfM and evaluation files."""
+    out = os.path.join(ROOT, "runs", run_id)
+    scene = json.load(open(SCENE))
+    spec = json.load(open(f"{out}/poses.json"))
+    poses, strategy = spec["poses"], spec["strategy"]
+    per_seed = []
+    for tag in sorted(os.listdir(f"{out}/sfm")):
+        work = f"{out}/sfm/{tag}"
+        sfm = json.load(open(f"{work}/sfm_stats.json"))
+        if reevaluate and sfm["registered"] >= 3:
+            evaluate(out, tag=tag)
+        ev = json.load(open(f"{work}/eval.json")) if os.path.exists(f"{work}/eval.json") \
+            else {"status": "failed"}
+        row = {"run": run_id, "strategy": strategy, "seed": sfm["seed"],
+               **{k: v for k, v in sfm.items() if not isinstance(v, (dict, list))}, **ev}
         row["min_features"] = int(min(sfm["features_per_image"].values()))
         per_seed.append(row)
-        print(f"[{run_id}] seed {seed}: registered {sfm['registered']}/{len(poses)}, "
-              f"points {sfm.get('points')}, F@0.3 {ev.get('fscore@0.30', float('nan')):.3f}", flush=True)
 
     cost = flight_cost([p["position"] for p in poses], scene)
     df = pd.DataFrame(per_seed)
+    first = per_seed[0]
     summary = {"run": run_id, "strategy": strategy, **cost,
-               "gsd_mm_px": per_seed[0].get("gsd_mm_px"),
-               "visible_gt_frac": per_seed[0].get("visible_gt_frac"),
-               "pred_coverage_3views": per_seed[0].get("pred_coverage_3views"),
-               "seeds": len(seeds), "note": note}
+               "gsd_mm_px": first.get("gsd_mm_px"),
+               "observable_frac": first.get("observable_frac"),
+               "visible_gt_frac": first.get("visible_gt_frac"),
+               "pred_coverage_3views": first.get("pred_coverage_3views"),
+               "min_features": first.get("min_features"),
+               "seeds": len(per_seed), "note": note}
     for m in KEY_METRICS:
-        vals = pd.to_numeric(df.get(m), errors="coerce") if m in df else pd.Series(dtype=float)
-        summary[m] = float(vals.mean()) if len(vals) else float("nan")
-        summary[m + "_sd"] = float(vals.std(ddof=0)) if len(vals) else float("nan")
+        vals = pd.to_numeric(df[m], errors="coerce") if m in df else pd.Series([np.nan])
+        summary[m] = float(vals.mean())
+        summary[m + "_sd"] = float(vals.std(ddof=0))
     json.dump(summary, open(f"{out}/summary.json", "w"), indent=2)
     _upsert(os.path.join(RESULTS, "results.csv"), pd.DataFrame([summary]), ["run"])
     _upsert(os.path.join(RESULTS, "results_by_seed.csv"), df, ["run", "seed"])
@@ -117,12 +136,21 @@ def _upsert(path: str, new: pd.DataFrame, keys: list[str]) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--strategy", required=True)
-    ap.add_argument("--run-id", required=True)
+    ap.add_argument("--strategy")
+    ap.add_argument("--run-id")
+    ap.add_argument("--reevaluate", nargs="*", metavar="RUN",
+                    help="re-score saved reconstructions (all runs if none given) and exit")
     ap.add_argument("--n", type=int, default=24)
     ap.add_argument("--rerender", action="store_true")
     ap.add_argument("--note", default="")
     a = ap.parse_args()
+    if a.reevaluate is not None:
+        ids = a.reevaluate or sorted(d for d in os.listdir(os.path.join(ROOT, "runs"))
+                                     if os.path.exists(os.path.join(ROOT, "runs", d, "sfm")))
+        for rid in ids:
+            sm = summarise(rid, reevaluate=True)
+            print(rid, sm["strategy"], f"F@0.3={sm['fscore@0.30']:.3f}", f"R@1={sm['recall@1.00']:.3f}")
+        sys.exit(0)
     s = run(a.strategy, a.run_id, a.n, rerender=a.rerender, note=a.note)
     print(json.dumps({k: s[k] for k in ("run", "registered", "points", "fscore@0.30",
                                          "path_length_m", "flight_time_s")}, indent=1))

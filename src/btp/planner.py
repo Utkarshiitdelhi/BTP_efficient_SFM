@@ -5,6 +5,10 @@
    own height; overhead views aim at the roof centre.
 2. Score: ray-cast each candidate against surface samples (visibility.py).
    A view is *useful* to a sample if it sees it at incidence < MAX_INC.
+   v2 ("planner_res") also requires the view to RESOLVE the sample: effective
+   ground sampling distance  distance / f_px / cos(incidence)  below
+   MAX_EFF_GSD. v1 counted grazing, distant views as coverage; the baselines
+   showed SfM cannot use them (the high orbit's walls), see README.
 3. Select greedily. Each sample's utility saturates at 3 useful views from
    directions >= MIN_SEP apart, so near-duplicate views earn nothing. That
    is a concave function of a coverage count - submodular - so greedy
@@ -28,6 +32,8 @@ TARGET_VIEWS = 3         # views per surface point at which utility saturates
 GAIN = np.array([0.40, 0.35, 0.25])   # utility of the 1st, 2nd, 3rd useful view
 MIN_OVERLAP = 0.25       # fraction of a new view's points already seen by one chosen view
 SAFETY_M = 3.0           # clearance around the building's bounding box
+MAX_EFF_GSD = 0.12       # v2: metres per pixel on the surface for a view to count
+MAX_LINK_DEG = 35.0      # v2: a new view must overlap a chosen view within this angle
 
 
 # ---------------------------------------------------------------- candidates
@@ -46,76 +52,73 @@ def candidates(scene: dict, radius_mults=(2.8, 2.0), n_az=24) -> list[dict]:
                 a = 2 * math.pi * (k + 0.5 * ri) / n_az
                 pos = (ctr[0] + R * math.cos(a), ctr[1] + R * math.sin(a), z)
                 if hf <= 1.0:
-                    poses.append({"position": pos, "target": (ctr[0], ctr[1], z)})
-                poses.append({"position": pos, "target": tuple(ctr)})
+                    poses.append({"position": pos, "target": (ctr[0], ctr[1], z),
+                                  "ring": f"r{rm}_h{hf}_level"})
+                poses.append({"position": pos, "target": tuple(ctr), "ring": f"r{rm}_h{hf}_centre"})
     # close-in ring above the roof, looking down at the roof
     R = r0 * 1.0
     for k in range(n_az // 2):
         a = 2 * math.pi * k / (n_az // 2)
         pos = (ctr[0] + R * math.cos(a), ctr[1] + R * math.sin(a), hi[2] + 0.35 * H)
-        poses.append({"position": pos, "target": (ctr[0], ctr[1], hi[2] - 0.1 * H)})
+        poses.append({"position": pos, "target": (ctr[0], ctr[1], hi[2] - 0.1 * H),
+                      "ring": "roof_down"})
     return [p for p in poses if not _inside_box(p["position"], scene, SAFETY_M)]
 
 
 # ---------------------------------------------------------------- selection
-def select(V, I, dirs, n_views: int, min_overlap=MIN_OVERLAP, start: int | None = None):
-    """Greedy submodular selection.
+def select(V, I, dirs, n_views: int, min_overlap=MIN_OVERLAP, useful=None, axes=None,
+           max_link_deg=None):
+    """Greedy submodular selection of n_views (equal-image-count planner).
 
     V: (C, S) bool visibility, I: (C, S) incidence degrees,
     dirs: (C, S, 3) unit viewing directions candidate -> sample.
     """
-    C, S = V.shape
-    useful = V & (I < MAX_INC)
-    cos_sep = np.cos(np.radians(MIN_SEP))
-    count = np.zeros(S, int)                         # useful views counted so far
-    kept = np.zeros((S, TARGET_VIEWS, 3))            # directions of counted views
-    seen_by = np.zeros((0, S), bool)
+    cov = _Coverage(V, I, dirs, useful)
+    seen_by = np.zeros((0, V.shape[1]), bool)
     chosen: list[int] = []
-    for step in range(n_views):
-        best, best_gain = -1, -1.0
-        # candidate gain = sum over samples of the next increment, if the view adds parallax
-        for c in range(C):
-            if c in chosen:
+    for _ in range(n_views):
+        best, best_gain = -1, 0.0
+        for c in range(V.shape[0]):
+            if c in chosen or not _linked(c, chosen, V, seen_by, axes, min_overlap, max_link_deg):
                 continue
-            u = useful[c] & (count < TARGET_VIEWS)
-            if not u.any():
-                continue
-            if chosen:
-                ov = (seen_by & V[c]).sum(1).max() / max(V[c].sum(), 1)
-                if ov < min_overlap:
-                    continue
-            idx = np.where(u)[0]
-            d = dirs[c, idx]
-            sep_ok = np.ones(len(idx), bool)
-            for j in range(TARGET_VIEWS):
-                has = count[idx] > j
-                sep_ok &= ~has | (np.einsum("ij,ij->i", kept[idx, j], d) < cos_sep)
-            g = GAIN[count[idx[sep_ok]]].sum()
+            g = cov.gain(c)
             if g > best_gain:
                 best, best_gain = c, g
-        if start is not None and step == 0:
-            best = start
         if best < 0:
             break
         chosen.append(best)
+        cov.add(best)
         seen_by = np.vstack([seen_by, V[best][None]])
-        idx = np.where(useful[best] & (count < TARGET_VIEWS))[0]
-        d = dirs[best, idx]
-        ok = np.ones(len(idx), bool)
-        for j in range(TARGET_VIEWS):
-            has = count[idx] > j
-            ok &= ~has | (np.einsum("ij,ij->i", kept[idx, j], d) < cos_sep)
-        idx = idx[ok]
-        kept[idx, count[idx]] = d[ok]
-        count[idx] += 1
-    return chosen, count
+    return chosen, cov.count
+
+def useful_mask(V, D, I, f_px: float, max_eff_gsd: float | None):
+    """Views that see a sample usefully: facing it, and (v2) resolving it finely enough."""
+    u = V & (I < MAX_INC)
+    if max_eff_gsd is not None:
+        eff = D / f_px / np.cos(np.radians(np.minimum(I, 89.0)))
+        u &= eff < max_eff_gsd
+    return u
+
+
+def _linked(c, chosen, V, seen_by, axes, min_overlap, max_link_deg):
+    """Can SfM register view c? It must share enough surface with one chosen view
+    and (v2) not differ from that view's direction by more than max_link_deg."""
+    if not chosen:
+        return True
+    ov = (seen_by & V[c]).sum(1) / max(V[c].sum(), 1)
+    ok = ov >= min_overlap
+    if max_link_deg is not None:
+        ang = np.degrees(np.arccos(np.clip(axes[chosen] @ axes[c], -1, 1)))
+        ok &= ang <= max_link_deg
+    return bool(ok.any())
 
 
 class _Coverage:
     """Tracks per-sample useful-view counts and gives each candidate's marginal gain."""
 
-    def __init__(self, V, I, dirs):
-        self.V, self.useful, self.dirs = V, V & (I < MAX_INC), dirs
+    def __init__(self, V, I, dirs, useful=None):
+        self.V, self.dirs = V, dirs
+        self.useful = useful if useful is not None else V & (I < MAX_INC)
         S = V.shape[1]
         self.count = np.zeros(S, int)
         self.kept = np.zeros((S, TARGET_VIEWS, 3))
@@ -141,13 +144,15 @@ class _Coverage:
 
 
 def select_budget(V, I, dirs, L, budget_s: float, speed: float, dwell: float,
-                  min_overlap=MIN_OVERLAP, max_views: int = 60, mode: str = "ratio"):
+                  min_overlap=MIN_OVERLAP, max_views: int = 60, mode: str = "ratio",
+                  useful=None, axes=None, max_link_deg=None):
     """Cost-aware greedy (orienteering): add the view with the best gain per
     extra second of flight, inserted at its cheapest point in the current tour,
     until the flight-time budget is spent. L is the (C, C) leg-length matrix."""
     C = V.shape[0]
-    cov = _Coverage(V, I, dirs)
-    tour: list[int] = []
+    cov = _Coverage(V, I, dirs, useful)
+    tour: list[int] = []                 # route order
+    added: list[int] = []                # selection order; rows of seen_by follow this
     tour_len = 0.0
     seen_by = np.zeros((0, V.shape[1]), bool)
     while len(tour) < max_views:
@@ -155,10 +160,8 @@ def select_budget(V, I, dirs, L, budget_s: float, speed: float, dwell: float,
         for c in range(C):
             if c in tour:
                 continue
-            if tour:
-                ov = (seen_by & V[c]).sum(1).max() / max(V[c].sum(), 1)
-                if ov < min_overlap:
-                    continue
+            if tour and not _linked(c, added, V, seen_by, axes, min_overlap, max_link_deg):
+                continue
             g = cov.gain(c)
             if g <= 0:
                 continue
@@ -181,10 +184,92 @@ def select_budget(V, I, dirs, L, budget_s: float, speed: float, dwell: float,
         if best < 0:
             break
         tour.insert(best_ins[0], best)
-        tour_len += best_ins[1]
+        tour, tour_len = two_opt(tour, L)     # keep the route short so the budget is not misjudged
+        added.append(best)
         cov.add(best)
         seen_by = np.vstack([seen_by, V[best][None]])
     return tour, cov.count
+
+
+def coverage_value(counts: np.ndarray) -> float:
+    """Concave utility of per-sample useful-view counts (saturates at TARGET_VIEWS)."""
+    cum = np.concatenate([[0.0], np.cumsum(GAIN)])
+    return float(cum[np.minimum(counts, TARGET_VIEWS)].sum())
+
+
+def local_search(tour: list[int], useful, V, L, budget_s, speed, dwell, axes=None,
+                 min_overlap=MIN_OVERLAP, max_link_deg=None, max_passes: int = 6):
+    """Swap / add / drop moves that raise coverage_value while staying within budget.
+
+    Each accepted move is re-routed with 2-opt. Moves must keep every view
+    linked to the rest (overlap and, for v2, direction), so SfM can chain them.
+    """
+    U = useful.astype(np.int16)
+    tour, length = two_opt(tour, L)
+    counts = U[tour].sum(0)
+    value = coverage_value(counts)
+    C = U.shape[0]
+
+    def fits(t, ln):
+        return ln / speed + dwell * len(t) <= budget_s + 1e-9
+
+    def linked_set(t):
+        if len(t) < 2:
+            return True
+        for c in t:
+            others = [o for o in t if o != c]
+            if not _linked(c, others, V, V[others], axes, min_overlap, max_link_deg):
+                return False
+        return True
+
+    for _ in range(max_passes):
+        improved = False
+        # add moves (cheapest insertion), then swaps
+        for c in np.argsort(-U.sum(1)):
+            c = int(c)
+            if c in tour:
+                continue
+            new_val = coverage_value(counts + U[c])
+            if new_val <= value + 1e-9:
+                continue
+            t2, l2 = two_opt(tour + [c], L)
+            if fits(t2, l2) and _linked(c, tour, V, V[tour], axes, min_overlap, max_link_deg):
+                tour, length, counts, value, improved = t2, l2, counts + U[c], new_val, True
+        for out in list(tour):
+            if out not in tour:
+                continue
+            base = counts - U[out]
+            rest = [t for t in tour if t != out]
+            gains = np.array([coverage_value(base + U[c]) if c not in tour else -1.0
+                              for c in range(C)])
+            for c in np.argsort(-gains)[:40]:
+                c = int(c)
+                if gains[c] <= value + 1e-9:
+                    break
+                t2, l2 = two_opt(rest + [c], L)
+                if fits(t2, l2) and linked_set(t2):
+                    tour, length, counts, value, improved = t2, l2, base + U[c], gains[c], True
+                    break
+        if not improved:
+            break
+    return tour, length, counts
+
+
+def two_opt(tour: list[int], L: np.ndarray) -> tuple[list[int], float]:
+    """2-opt improvement of a closed tour on leg matrix L; returns (tour, length)."""
+    t = list(tour)
+    n = len(t)
+    improved = n > 3
+    while improved:
+        improved = False
+        for i in range(n - 1):
+            for j in range(i + 2, n if i > 0 else n - 1):
+                a, b, c, d = t[i], t[i + 1], t[j], t[(j + 1) % n]
+                if L[a, c] + L[b, d] < L[a, b] + L[c, d] - 1e-9:
+                    t[i + 1:j + 1] = reversed(t[i + 1:j + 1])
+                    improved = True
+    length = float(sum(L[t[k], t[(k + 1) % n]] for k in range(n))) if n > 1 else 0.0
+    return t, length
 
 
 def leg_matrix(positions, scene) -> np.ndarray:
@@ -240,8 +325,8 @@ def tour_length(positions, scene: dict) -> float:
 
 
 # ---------------------------------------------------------------- entry point
-def plan(scene: dict, n_views: int, cam: dict, mesh_path: str, n_samples: int = 8000,
-         seed: int = 0, min_overlap: float = MIN_OVERLAP, return_details: bool = False):
+def _setup(scene, cam, mesh_path, n_samples, seed, max_eff_gsd):
+    from btp.geometry import intrinsics
     mesh = load_mesh(mesh_path)
     P, N, _ = sample_surface(mesh, n_samples, seed=seed)
     cand = candidates(scene)
@@ -249,7 +334,21 @@ def plan(scene: dict, n_views: int, cam: dict, mesh_path: str, n_samples: int = 
     pos = np.array([c["position"] for c in cand])
     dirs = P[None] - pos[:, None]
     dirs /= np.linalg.norm(dirs, axis=2, keepdims=True)
-    chosen, count = select(V, I, dirs, n_views, min_overlap=min_overlap)
+    axes = np.array([np.subtract(c["target"], c["position"]) for c in cand], float)
+    axes /= np.linalg.norm(axes, axis=1, keepdims=True)
+    f_px = intrinsics(cam["lens_mm"], cam["sensor_mm"], cam["res_x"], cam["res_y"])[0]
+    useful = useful_mask(V, D, I, f_px, max_eff_gsd)
+    return cand, pos, V, I, dirs, axes, useful
+
+
+def plan(scene: dict, n_views: int, cam: dict, mesh_path: str, n_samples: int = 8000,
+         seed: int = 0, min_overlap: float = MIN_OVERLAP, max_eff_gsd: float | None = None,
+         max_link_deg: float | None = None, return_details: bool = False):
+    """Best n_views views, then the shortest tour through them."""
+    cand, pos, V, I, dirs, axes, useful = _setup(scene, cam, mesh_path, n_samples, seed,
+                                                 max_eff_gsd)
+    chosen, count = select(V, I, dirs, n_views, min_overlap=min_overlap, useful=useful,
+                           axes=axes, max_link_deg=max_link_deg)
     picked = [cand[i] for i in chosen]
     order, length = route([p["position"] for p in picked], scene)
     poses = [picked[i] for i in order]
@@ -262,30 +361,54 @@ def plan(scene: dict, n_views: int, cam: dict, mesh_path: str, n_samples: int = 
 
 def plan_budget(scene: dict, budget_s: float, cam: dict, mesh_path: str,
                 speed: float = 3.0, dwell: float = 2.0, n_samples: int = 8000, seed: int = 0,
+                max_eff_gsd: float | None = None, max_link_deg: float | None = None,
                 return_details: bool = False):
-    mesh = load_mesh(mesh_path)
-    P, N, _ = sample_surface(mesh, n_samples, seed=seed)
-    cand = candidates(scene)
-    V, D, I = visibility_matrix(mesh, P, N, cand, cam)
-    pos = np.array([c["position"] for c in cand])
-    dirs = P[None] - pos[:, None]
-    dirs /= np.linalg.norm(dirs, axis=2, keepdims=True)
+    """Most coverage within a flight-time budget (orienteering)."""
+    cand, pos, V, I, dirs, axes, useful = _setup(scene, cam, mesh_path, n_samples, seed,
+                                                 max_eff_gsd)
     L = leg_matrix(pos, scene)
     # Budgeted submodular maximisation: run the gain-per-second greedy and the
     # plain-gain greedy, keep the better (the standard remedy for ratio-greedy's
     # weakness on cheap low-value items; Khuller, Moss & Naor 1999).
     best = None
     for mode in ("ratio", "gain"):
-        tour, count = select_budget(V, I, dirs, L, budget_s, speed, dwell, mode=mode)
+        tour, count = select_budget(V, I, dirs, L, budget_s, speed, dwell, mode=mode,
+                                    useful=useful, axes=axes, max_link_deg=max_link_deg)
         score = sum(GAIN[:k].sum() for k in np.minimum(count, TARGET_VIEWS))
         if best is None or score > best[0]:
             best = (score, tour, count, mode)
     _, tour, count, mode_used = best
+
+    # Local search from two starts - the greedy tour, and the best whole ring of
+    # candidates that fits the budget (a template start) - keeping the better.
+    starts = {"greedy": tour}
+    rings: dict[str, list[int]] = {}
+    for i, c in enumerate(cand):
+        rings.setdefault(c.get("ring", ""), []).append(i)
+    U16 = useful.astype(np.int16)
+    best_ring, best_val = None, -1.0
+    for name, idx in rings.items():
+        t, ln = two_opt(idx, L)
+        if ln / speed + dwell * len(t) <= budget_s:
+            v = coverage_value(U16[t].sum(0))
+            if v > best_val:
+                best_ring, best_val = name, v
+    if best_ring is not None:
+        starts["ring:" + best_ring] = rings[best_ring]
+    results = {}
+    for name, t0 in starts.items():
+        t, ln, cnt = local_search(list(t0), useful, V, L, budget_s, speed, dwell, axes=axes,
+                                  max_link_deg=max_link_deg)
+        results[name] = (coverage_value(cnt), t, cnt)
+    start_used = max(results, key=lambda k: results[k][0])
+    _, tour, count = results[start_used]
     picked = [cand[i] for i in tour]
     order, length = route([p["position"] for p in picked], scene)   # polish the order
     poses = [picked[i] for i in order]
     if return_details:
         return poses, {"n_candidates": len(cand), "n_views": len(poses), "mode": mode_used,
+                       "start": start_used,
+                       "start_values": {k: round(v[0], 1) for k, v in results.items()},
                        "planned_cov3": float((count >= TARGET_VIEWS).mean()),
                        "tour_length_m": length,
                        "flight_time_s": length / speed + dwell * len(poses)}
@@ -293,13 +416,21 @@ def plan_budget(scene: dict, budget_s: float, cam: dict, mesh_path: str,
 
 
 def plan_from_spec(strategy: str, scene: dict, n: int, cam: dict):
-    """'planner' -> best 24 views; 'planner_budget<T>' -> flight-time budget of T seconds."""
+    """Strategy names:
+    planner               v1, best n views (visibility-only usefulness)
+    planner_budget<T>     v1, flight-time budget of T seconds
+    planner_res           v2, resolution-aware usefulness + angular link rule
+    planner_res_budget<T> v2 with a flight-time budget
+    """
     import os
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     mesh = os.path.join(root, "data/gt_mesh.ply")
-    if strategy.startswith("planner_budget"):
-        return plan_budget(scene, float(strategy[len("planner_budget"):]), cam, mesh)
-    return plan(scene, n, cam, mesh)
+    v2 = strategy.startswith("planner_res")
+    kw = {"max_eff_gsd": MAX_EFF_GSD, "max_link_deg": MAX_LINK_DEG} if v2 else {}
+    rest = strategy[len("planner_res"):] if v2 else strategy[len("planner"):]
+    if rest.startswith("_budget"):
+        return plan_budget(scene, float(rest[len("_budget"):]), cam, mesh, **kw)
+    return plan(scene, n, cam, mesh, **kw)
 
 
 # ---------------------------------------------------------------- helpers

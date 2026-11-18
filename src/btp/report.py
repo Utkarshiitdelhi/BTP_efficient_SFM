@@ -19,11 +19,14 @@ RES = os.path.join(ROOT, "results")
 FIG = os.path.join(RES, "figures")
 
 # reference palette (light), slots assigned in this fixed order and never cycled
-ORDER = ["orbit_single", "orbit_multi", "orbit_high", "oblique_grid", "planner", "planner_budget153"]
-COLOR = dict(zip(ORDER, ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]))
+ORDER = ["orbit_single", "orbit_multi", "orbit_high", "oblique_grid", "planner",
+         "planner_budget153", "planner_res", "planner_res_budget153"]
+COLOR = dict(zip(ORDER, ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300",
+                         "#6250d6", "#e34948"]))
 LABEL = {"orbit_single": "Single orbit", "orbit_multi": "Multi-height orbit",
          "orbit_high": "High orbit", "oblique_grid": "Oblique grid",
-         "planner": "Planner (24 views)", "planner_budget153": "Planner (153 s budget)"}
+         "planner": "Planner v1 (24 views)", "planner_budget153": "Planner v1 (153 s)",
+         "planner_res": "Planner v2 (24 views)", "planner_res_budget153": "Planner v2 (153 s)"}
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 
 # Kaggle run_002 v1 (sun only, no sky light): SIFT features per image, from its COLMAP log
@@ -137,8 +140,9 @@ def coverage_maps(runs):
     axes = np.atleast_1d(axes)
     for ax, (rid, strat) in zip(axes, runs):
         z = np.load(f"{ROOT}/runs/{rid}/sfm/seed0/surface_eval.npz")
-        P, seen, d = z["P"], z["seen"], z["d_g2r"]
-        got = seen & (d < 1.0)
+        P, obs, d = z["P"], z["observable"], z["d_g2r"]
+        seen = obs                                   # same denominator for every strategy
+        got = obs & (d < 1.0)
         ax.set_facecolor(SURFACE)
         ax.axis("off")
         # unroll the four elevations by azimuth round the building centre
@@ -147,10 +151,10 @@ def coverage_maps(runs):
         ax.scatter(az[~seen], P[~seen, 2], s=0.3, color="#d9d8d3", rasterized=True)
         ax.scatter(az[seen & ~got], P[seen & ~got, 2], s=0.3, color="#9a9890", rasterized=True)
         ax.scatter(az[got], P[got, 2], s=0.3, color=COLOR.get(strat, INK), rasterized=True)
-        ax.set_title(f"{LABEL.get(strat, strat)}\n{got[seen].mean():.0%} of visible surface",
+        ax.set_title(f"{LABEL.get(strat, strat)}\n{got[seen].mean():.0%} of observable surface",
                      fontsize=8.5, color=INK)
     fig.suptitle("Where each flight reconstructed the building (unrolled round the facades; "
-                 "colour = within 1 m, dark grey = visible but missed, light = never seen)",
+                 "colour = reconstructed within 1 m, dark grey = missed, light = not observable by any flight)",
                  x=0.01, ha="left", fontsize=9.5, color=INK)
     fig.tight_layout()
     fig.savefig(f"{FIG}/coverage_maps.png", dpi=160, facecolor=SURFACE)
