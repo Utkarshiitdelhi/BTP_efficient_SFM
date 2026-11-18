@@ -32,9 +32,10 @@ scored against the true mesh. Full table: [`results/results_table.md`](results/r
 
 1. **The final planner beats the best standard flight while flying less.** Planner v3 with 24
    views scores F = 0.227 against the single orbit's 0.193 (+18%), with a 26% lower median error
-   (1.9 vs 2.6 cm) and the same coverage, in 126 s instead of 153 s. Its plan is a tighter orbit
-   (36 m instead of 50 m standoff) that zig-zags between 70% and 90% of the building height,
-   which the planner chose for finer ground resolution on the upper facades.
+   (1.9 vs 2.6 cm) and the same coverage, in 126 s instead of 153 s. Its plan is a closer, higher orbit
+   (36 m out at 34 m altitude, against 50 m out at 24 m), with every camera tilted down at the
+   building's centre and one of the 24 views raised to 44 m. The planner chose it for finer
+   ground resolution on the facades.
 2. **More flying is not better flying.** The multi-height orbit flies 2.4× longer than the
    single orbit and reconstructs a fifth of the surface: its three rings are too far apart in
    height for SfM to join them, so only one ring's cameras end up correctly placed. Image
