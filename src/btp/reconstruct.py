@@ -8,6 +8,8 @@ and refines the focal length in bundle adjustment.
 focal="known" gives COLMAP the true calibration and holds it fixed, which is
 what a calibrated survey drone would provide and isolates the effect of the
 flight path from focal-length drift.
+focal="prior" is for real phone photos: a SIMPLE_RADIAL camera (focal + one
+lens-distortion term) started from cam["f_px"] (from EXIF) and refined.
 """
 from __future__ import annotations
 
@@ -48,6 +50,9 @@ def reconstruct(run_dir: str, cam: dict, focal: str = "known", seed: int = 0,
 
     reader = pycolmap.ImageReaderOptions()
     reader.camera_model = "PINHOLE"
+    if focal == "prior":
+        reader.camera_model = "SIMPLE_RADIAL"
+        reader.camera_params = f"{cam['f_px']},{cam['cx']},{cam['cy']},0"
     if focal == "known":
         f, cx, cy = intrinsics(cam["lens_mm"], cam["sensor_mm"], cam["res_x"], cam["res_y"])
         reader.camera_params = f"{f},{f},{cx},{cy}"
